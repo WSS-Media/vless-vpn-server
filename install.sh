@@ -1,78 +1,81 @@
 #!/bin/bash
-# Marzban Auto Deployment Script
-# Author: Artem Griganov (@iamnovye)
-# GitHub: https://github.com/your-repo-if-needed
 
+# ┌───────────────────────────────────────────────┐
+# │  VLESS VPN Server Installer by Artem Griganov │
+# │     Instagram: @iamnovye                      │
+# └───────────────────────────────────────────────┘
 
 set -e
 
-echo "🛠️  Marzban + VLESS REALITY Installer"
+echo -e "\n=== 🚀 Установка VLESS VPN Сервера ==="
+echo "Автор: Artem Griganov (@iamnovye)\n"
 
-# === ПОЛЬЗОВАТЕЛЬСКИЙ ВВОД ===
-read -rp "📌 Введите домен (например: vpn.example.com): " DOMAIN
-read -rp "📧 Введите email (для Let's Encrypt): " EMAIL
-read -rp "👤 Введите имя администратора: " ADMIN_USERNAME
-read -rsp "🔐 Введите пароль администратора: " ADMIN_PASSWORD
-echo
-read -rp "👥 Введите имя VLESS клиента: " CLIENT_NAME
+# ─────── Ввод данных ────────────────
 
-# === СЛУЖЕБНЫЕ ПЕРЕМЕННЫЕ ===
-UUID=$(uuidgen)
-PRIVATE_KEY=$(openssl ecparam -name prime256v1 -genkey -noout | openssl ec -text -noout | grep -A5 "priv:" | tail -n +2 | tr -d ': ' | tr -d '\n' | cut -c1-64)
-SHORT_ID=$(openssl rand -hex 8)
+read -rp "🌍 Введите домен (A-запись должна указывать на сервер): " DOMAIN
+read -rp "🧠 Введите публичный IP сервера: " SERVER_IP
+read -rp "👤 Логин администратора Marzban: " ADMIN_USER
+read -rsp "🔐 Пароль администратора: " ADMIN_PASS; echo
 
-# === УСТАНОВКА ЗАВИСИМОСТЕЙ ===
-apt update && apt install -y curl socat cron bash unzip sqlite3 certbot python3-certbot
+# ─────── Зависимости ────────────────
 
-# === УСТАНОВКА DOCKER ===
-if ! command -v docker &> /dev/null; then
-  curl -fsSL https://get.docker.com | sh
-fi
+echo "[+] Установка зависимостей..."
+apt update -y
+apt install -y curl wget git socat ufw certbot python3-certbot
 
-if ! command -v docker-compose &> /dev/null; then
-  curl -L "https://github.com/docker/compose/releases/download/v2.24.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-  chmod +x /usr/local/bin/docker-compose
-fi
+# ─────── Настройка брандмауэра ───────
 
-# === КЛОНИРОВАНИЕ MARZBAN ===
-cd /opt
-git clone https://github.com/Gozargah/Marzban.git marzban
-cd marzban
+echo "[+] Открытие портов..."
+ufw allow 80/tcp
+ufw allow 443/tcp
+ufw --force enable
 
-# === .env ===
-cat <<EOF > .env
-DOMAIN=$DOMAIN
-PANEL_URL=https://$DOMAIN
-EMAIL=$EMAIL
-XRAY_VLESS_REALITY_PRIVATE_KEY=$PRIVATE_KEY
-XRAY_VLESS_REALITY_SHORT_ID=$SHORT_ID
-EOF
+# ─────── Клонирование репозитория ──
 
-# === СЕРТИФИКАТЫ ===
-systemctl stop nginx 2>/dev/null || true
-certbot certonly --standalone --non-interactive --agree-tos --email $EMAIL -d $DOMAIN
+echo "[+] Клонирование репозитория..."
+git clone https://github.com/WSS-Media/vless-vpn-server.git /opt/vless-vpn-server
+cd /opt/vless-vpn-server
 
-mkdir -p /var/lib/marzban/certs
-cp /etc/letsencrypt/live/$DOMAIN/fullchain.pem /var/lib/marzban/certs/fullchain.pem
-cp /etc/letsencrypt/live/$DOMAIN/privkey.pem /var/lib/marzban/certs/key.pem
+# ─────── Получение SSL ──────────────
+
+echo "[+] Получение SSL сертификата для $DOMAIN..."
+certbot certonly --standalone --agree-tos --register-unsafely-without-email -d "$DOMAIN" --non-interactive
+
+mkdir -p /var/lib/marzban/certs/
+cp "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" /var/lib/marzban/certs/fullchain.pem
+cp "/etc/letsencrypt/live/$DOMAIN/privkey.pem" /var/lib/marzban/certs/key.pem
 chmod 644 /var/lib/marzban/certs/*.pem
 
-# === ЗАПУСК MARZBAN ===
-docker-compose down || true
-docker-compose up -d
+# ─────── Генерация ключей ──────────
 
-sleep 10
+echo "[+] Генерация UUID, privateKey и shortId..."
+UUID=$(cat /proc/sys/kernel/random/uuid)
+PRIVATE_KEY=$(xray x25519 | grep 'Private key' | awk '{print $NF}')
+SHORT_ID=$(openssl rand -hex 8)
 
-# === СОЗДАНИЕ АДМИНА ===
-docker exec -i marzban-marzban-1 marzban add-user --username $ADMIN_USERNAME --password $ADMIN_PASSWORD --is_admin true
+# ─────── Настройка ENV ─────────────
 
-# === ДОБАВЛЕНИЕ VLESS-КЛИЕНТА ===
-docker exec -i marzban-marzban-1 marzban add-client --username $CLIENT_NAME --uuid $UUID --inbound-tag VLESS_TCP_REALITY
+echo "[+] Подготовка .env..."
+cat > .env <<EOF
+DOMAIN=$DOMAIN
+UUID=$UUID
+PRIVATE_KEY=$PRIVATE_KEY
+SHORT_ID=$SHORT_ID
+ADMIN_USERNAME=$ADMIN_USER
+ADMIN_PASSWORD=$ADMIN_PASS
+EOF
 
-# === ВЫВОД ДАННЫХ ===
-echo "✅ Установка завершена!"
-echo "🔗 Панель: https://$DOMAIN"
-echo "👤 Админ: $ADMIN_USERNAME"
-echo "📱 VLESS UUID: $UUID"
-echo "🔑 PRIVATE KEY: $PRIVATE_KEY"
-echo "🧬 SHORT ID: $SHORT_ID"
+# ─────── Запуск установки ──────────
+
+echo "[+] Запуск установщика..."
+bash internal/install_core.sh
+
+# ─────── Финал ─────────────────────
+
+echo -e "\n✅ Установка завершена!"
+echo "🌐 Панель: https://$DOMAIN"
+echo "👤 Логин: $ADMIN_USER"
+echo "🔐 Пароль: $ADMIN_PASS"
+echo "📡 UUID: $UUID"
+echo "🗝️  Reality Private Key: $PRIVATE_KEY"
+echo "🔎 Short ID: $SHORT_ID"
