@@ -1,79 +1,67 @@
 #!/bin/bash
 
-echo -e "=== 🚀 Установка VLESS VPN Сервера ==="
-echo -e "Автор: Artem Griganov (@iamnovye)\n"
+set -e
 
-# === Ввод данных ===
+echo -e "\n=== 🚀 Установка VLESS VPN Сервера ==="
+echo "Автор: Artem Griganov (@iamnovye)"
+echo
+
 read -p "🌍 Введите домен (A-запись должна указывать на сервер): " DOMAIN
 read -p "🧠 Введите публичный IP сервера: " SERVER_IP
-read -p "👤 Логин администратора Marzban: " ADMIN_USER
-read -s -p "🔐 Пароль администратора: " ADMIN_PASS
-echo ""
+read -p "👤 Логин администратора Marzban: " ADMIN_USERNAME
+read -s -p "🔐 Пароль администратора: " ADMIN_PASSWORD
+echo
 
-INSTALL_DIR="/opt/vless-vpn-server"
-
-# === Очистка старой установки, если нужно ===
-if [ -d "$INSTALL_DIR" ]; then
-  echo "[!] Найдена предыдущая установка. Удаляю..."
-  docker compose -f $INSTALL_DIR/docker-compose.yml down 2>/dev/null
-  rm -rf "$INSTALL_DIR"
-fi
-
-# === Установка зависимостей ===
-echo -e "[+] Установка зависимостей..."
+echo -e "\n[+] Установка зависимостей..."
 apt update -qq
-apt install -y curl wget git unzip socat ufw certbot python3-certbot docker.io docker-compose
+apt install -y curl wget git ufw unzip docker.io docker-compose certbot python3-certbot socat jq
 
-# === Открытие портов ===
-echo -e "[+] Открытие портов..."
-ufw allow 443
-ufw allow 80
-ufw --force enable
+echo -e "\n[+] Открытие порта 443..."
+ufw allow 443/tcp
+ufw allow 443/udp
+ufw enable
 
-# === Получение SSL сертификата ===
-echo -e "[+] Получение SSL сертификата для $DOMAIN..."
-certbot certonly --standalone -d $DOMAIN --non-interactive --agree-tos -m admin@$DOMAIN || {
-  echo "[!] Ошибка при получении сертификата"; exit 1;
-}
+echo -e "\n[+] Установка Docker..."
+systemctl start docker
+systemctl enable docker
 
-CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
-FULLCHAIN="$CERT_DIR/fullchain.pem"
-PRIVKEY="$CERT_DIR/privkey.pem"
+echo -e "\n[+] Установка Marzban..."
+MARZBAN_DIR="/opt/marzban"
+rm -rf $MARZBAN_DIR
+git clone https://github.com/Gozargah/Marzban.git $MARZBAN_DIR
+cd $MARZBAN_DIR
 
-if [ ! -f "$FULLCHAIN" ] || [ ! -f "$PRIVKEY" ]; then
-  echo "[!] Сертификаты не найдены"; exit 1
-fi
-
-# === Клонирование репозитория Marzban ===
-echo -e "[+] Клонирование Marzban..."
-git clone https://github.com/Gozargah/Marzban.git "$INSTALL_DIR"
-
-cd "$INSTALL_DIR"
-
-# === Генерация UUID и ключей ===
+echo -e "\n[+] Генерация .env..."
 UUID=$(cat /proc/sys/kernel/random/uuid)
-PRIVATE_KEY=$(openssl ecparam -genkey -name prime256v1 | openssl ec -outform PEM)
-SHORT_ID=$(openssl rand -hex 4)
+PRIVATE_KEY=$(openssl ecparam -name prime256v1 -genkey -noout | openssl ec -outform PEM)
+echo -e "DOMAIN=$DOMAIN\nUUID=$UUID" > .env
 
-# === Создание .env ===
-echo -e "[+] Создание .env файла..."
-cat <<EOF > .env
-DOMAIN=$DOMAIN
-UUID=$UUID
-PRIVATE_KEY=$PRIVATE_KEY
-SHORT_ID=$SHORT_ID
-ADMIN_USERNAME=$ADMIN_USER
-ADMIN_PASSWORD=$ADMIN_PASS
-CERT_FULLCHAIN=$FULLCHAIN
-CERT_PRIVKEY=$PRIVKEY
+cat <<EOF > docker-compose.override.yml
+services:
+  web:
+    ports:
+      - "443:443"
+    environment:
+      - CERTBOT_EMAIL=admin@$DOMAIN
 EOF
 
-# === Запуск контейнеров ===
-echo -e "[+] Запуск контейнеров..."
+echo -e "\n[+] Получение SSL сертификата..."
+certbot certonly --standalone -d $DOMAIN --non-interactive --agree-tos -m admin@$DOMAIN || true
+
+if [ ! -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
+    echo "[!] Сертификат не получен. Прерывание установки."
+    exit 1
+fi
+
+mkdir -p data/certs
+cp /etc/letsencrypt/live/$DOMAIN/fullchain.pem data/certs/fullchain.pem
+cp /etc/letsencrypt/live/$DOMAIN/privkey.pem data/certs/key.pem
+
+echo -e "\n[+] Запуск Marzban..."
+docker compose down || true
 docker compose up -d
 
-# === Готово ===
-echo -e "✅ Установка завершена!"
-echo -e "🌐 Панель доступна: https://$DOMAIN/dashboard"
-echo -e "🔑 Логин: $ADMIN_USER"
-echo -e "🔐 Пароль: $ADMIN_PASS"
+echo -e "\n✅ Установка завершена!"
+echo "🌐 Панель доступна: https://$DOMAIN"
+echo "👤 Логин: $ADMIN_USERNAME"
+echo "🔐 Пароль: $ADMIN_PASSWORD"
