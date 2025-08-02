@@ -1,93 +1,79 @@
 #!/bin/bash
 
-clear
-echo "=== 🚀 Установка VLESS VPN Сервера ==="
-echo "Автор: Artem Griganov (@iamnovye)"
-echo
+echo -e "=== 🚀 Установка VLESS VPN Сервера ==="
+echo -e "Автор: Artem Griganov (@iamnovye)\n"
 
-# Проверка sudo
-if [[ "$EUID" -ne 0 ]]; then
-  echo "Пожалуйста, запустите скрипт от root пользователя."
-  exit 1
-fi
-
-# Запрашиваем данные
+# === Ввод данных ===
 read -p "🌍 Введите домен (A-запись должна указывать на сервер): " DOMAIN
-read -p "🧠 Введите публичный IP сервера: " IP
+read -p "🧠 Введите публичный IP сервера: " SERVER_IP
 read -p "👤 Логин администратора Marzban: " ADMIN_USER
 read -s -p "🔐 Пароль администратора: " ADMIN_PASS
-echo
+echo ""
 
-WORKDIR="/opt/vless-vpn-server"
-TEMP_SCRIPT="/tmp/install_vless.sh"
+INSTALL_DIR="/opt/vless-vpn-server"
 
-function clean_up() {
-  echo "[*] Выполняется очистка предыдущей установки..."
-  systemctl stop docker >/dev/null 2>&1
-  apt-get remove -y docker docker.io containerd runc >/dev/null 2>&1
-  rm -rf $WORKDIR /var/lib/marzban /opt/marzban /etc/letsencrypt/live/$DOMAIN /etc/letsencrypt/archive/$DOMAIN
-  echo "[*] Очистка завершена."
-}
+# === Очистка старой установки, если нужно ===
+if [ -d "$INSTALL_DIR" ]; then
+  echo "[!] Найдена предыдущая установка. Удаляю..."
+  docker compose -f $INSTALL_DIR/docker-compose.yml down 2>/dev/null
+  rm -rf "$INSTALL_DIR"
+fi
 
-function install_docker() {
-  if ! command -v docker &> /dev/null; then
-    echo "[+] Установка Docker..."
-    curl -fsSL https://get.docker.com | bash
-  fi
-}
+# === Установка зависимостей ===
+echo -e "[+] Установка зависимостей..."
+apt update -qq
+apt install -y curl wget git unzip socat ufw certbot python3-certbot docker.io docker-compose
 
-function fail_prompt() {
-  echo "[!] Установка не удалась. Хотите начать заново? (Y/N)"
-  read -r CONFIRM
-  if [[ "$CONFIRM" =~ ^[Yy]$ ]]; then
-    clean_up
-    curl -s https://raw.githubusercontent.com/WSS-Media/vless-vpn-server/main/install.sh -o $TEMP_SCRIPT
-    chmod +x $TEMP_SCRIPT
-    bash $TEMP_SCRIPT
-    exit
-  else
-    echo "⛔ Установка прервана."
-    exit 1
-  fi
-}
-
-# Установка зависимостей
-echo "[+] Установка зависимостей..."
-apt update && apt install -y curl wget git ufw certbot python3-certbot socat unzip || fail_prompt
-
-# Открытие портов
-echo "[+] Открытие портов..."
-ufw allow 80/tcp
-ufw allow 443/tcp
+# === Открытие портов ===
+echo -e "[+] Открытие портов..."
+ufw allow 443
+ufw allow 80
 ufw --force enable
 
-# Клонирование репозитория
-echo "[+] Клонирование репозитория..."
-if [ -d "$WORKDIR" ]; then
-  echo "[!] Папка $WORKDIR уже существует."
-  fail_prompt
+# === Получение SSL сертификата ===
+echo -e "[+] Получение SSL сертификата для $DOMAIN..."
+certbot certonly --standalone -d $DOMAIN --non-interactive --agree-tos -m admin@$DOMAIN || {
+  echo "[!] Ошибка при получении сертификата"; exit 1;
+}
+
+CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
+FULLCHAIN="$CERT_DIR/fullchain.pem"
+PRIVKEY="$CERT_DIR/privkey.pem"
+
+if [ ! -f "$FULLCHAIN" ] || [ ! -f "$PRIVKEY" ]; then
+  echo "[!] Сертификаты не найдены"; exit 1
 fi
-git clone https://github.com/WSS-Media/vless-vpn-server.git $WORKDIR || fail_prompt
 
-# Получение SSL
-echo "[+] Получение SSL сертификата для $DOMAIN..."
-certbot certonly --standalone --agree-tos --register-unsafely-without-email -d "$DOMAIN" || fail_prompt
+# === Клонирование репозитория Marzban ===
+echo -e "[+] Клонирование Marzban..."
+git clone https://github.com/Gozargah/Marzban.git "$INSTALL_DIR"
 
-# Генерация данных
-echo "[+] Генерация UUID, privateKey и shortId..."
+cd "$INSTALL_DIR"
+
+# === Генерация UUID и ключей ===
 UUID=$(cat /proc/sys/kernel/random/uuid)
-PRIVATE_KEY=$(openssl ecparam -genkey -name prime256v1 -noout | openssl ec -outform DER | base64)
-SHORT_ID=$(head -c 8 /dev/urandom | xxd -p)
+PRIVATE_KEY=$(openssl ecparam -genkey -name prime256v1 | openssl ec -outform PEM)
+SHORT_ID=$(openssl rand -hex 4)
 
-# Установка Docker
-install_docker || fail_prompt
+# === Создание .env ===
+echo -e "[+] Создание .env файла..."
+cat <<EOF > .env
+DOMAIN=$DOMAIN
+UUID=$UUID
+PRIVATE_KEY=$PRIVATE_KEY
+SHORT_ID=$SHORT_ID
+ADMIN_USERNAME=$ADMIN_USER
+ADMIN_PASSWORD=$ADMIN_PASS
+CERT_FULLCHAIN=$FULLCHAIN
+CERT_PRIVKEY=$PRIVKEY
+EOF
 
-# Запуск основного установщика
-echo "[+] Запуск основного установщика..."
-cd $WORKDIR || fail_prompt
-bash internal/install_core.sh "$DOMAIN" "$IP" "$UUID" "$PRIVATE_KEY" "$SHORT_ID" "$ADMIN_USER" "$ADMIN_PASS" || fail_prompt
+# === Запуск контейнеров ===
+echo -e "[+] Запуск контейнеров..."
+docker compose up -d
 
-echo
-echo "✅ Установка завершена. Панель доступна по адресу: https://$DOMAIN"
-echo "🧑‍💼 Логин: $ADMIN_USER"
-echo "🔑 Пароль: $ADMIN_PASS"
+# === Готово ===
+echo -e "✅ Установка завершена!"
+echo -e "🌐 Панель доступна: https://$DOMAIN/dashboard"
+echo -e "🔑 Логин: $ADMIN_USER"
+echo -e "🔐 Пароль: $ADMIN_PASS"
